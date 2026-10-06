@@ -20,13 +20,14 @@ Regional content comes from the same runtime used by the ISO: either the `--loca
 
 - `packages`: additional target packages, one name per line, with blank lines and `#` comments allowed. The builder merges these into the ISO's copy of `omarchy-base.packages`, so they are both included in the offline repository and installed on the target. The source manifest is not modified.
 - `pacman/`: repository fragments used by the runtime finalizer. The builder also adds the community repository to its writable online config to obtain regional packages; it does not change its Arch channel mirrors.
+- `timezone` (optional): one zone name, such as `Asia/Shanghai`. The setup form preselects it in the timezone list when the network geo guess is unavailable, which is always the case offline. Both callers pass it: the ISO configurator from its copy of the profile, and first-boot setup from `default/regions/<region>/timezone` for the region in `/etc/omarchy/region`. A successful geo guess still wins, and the person can choose any other zone.
 - `skel/` (optional): new-user defaults. The ISO installer overlays these onto target `/etc/skel` after the base settings packages and before user creation, including installations that defer user creation until first boot. It never overlays existing home directories.
 
 For China, the builder installs `archlinuxcn-keyring` using the existing Arch trust chain before downloading other regional packages. Signature or keyring failures abort the build; no unverified keyserver trust or online signature bypass is added. The keyring is also installed on the target from the offline package set, then initialized and populated before online repositories are enabled. The ISO's existing offline repository verification policy is unchanged.
 
 ## Scope of the China profile
 
-The China profile currently provides repository defaults only. System language (Simplified Chinese), timezone (Asia/Shanghai), and input-method defaults are planned as separate changes on top of this mechanism: `packages` and `skel/` carry them into the ISO, and the installer stages `skel/` before any user exists.
+The China profile provides repository defaults and preselects `Asia/Shanghai` as the timezone. System language (Simplified Chinese) and input-method defaults are planned as separate changes on top of this mechanism: `packages` and `skel/` carry them into the ISO, and the installer stages `skel/` before any user exists.
 
 ## Remaining release validation
 
