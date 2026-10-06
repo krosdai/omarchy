@@ -167,10 +167,13 @@ omarchy_prompt_hostname() {
 }
 
 # A fresh machine often hasn't joined a network yet, so the geo guess fails
-# often; guard it or a `set -e` caller dies before the filter fallback.
+# often; guard it or a `set -e` caller dies before the filter fallback. Callers
+# may pass the zone to preselect when there is no guess (a region's default),
+# so an offline install does not open on the top of an alphabetical list.
 omarchy_prompt_timezone() {
   local guess status
   guess=$(tzupdate -p 2>/dev/null) || guess=""
+  [[ -n $guess ]] || guess="${1:-}"
 
   if [[ -n $guess ]]; then
     timezone=$(timedatectl list-timezones | gum choose --height 10 --selected "$guess" --header "Timezone") && status=0 || status=$?
