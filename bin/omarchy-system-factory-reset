@@ -120,7 +120,9 @@ cleanup() {
   rmdir "$ESP_MNT" 2>/dev/null || true
 
   if mountpoint -q "$TOP_MNT" 2>/dev/null; then
-    if [[ -d $TOP_MNT/$NEXT_NAME && ${swap_done:-0} == 0 ]]; then
+    # Never delete the staged root while there is no @: after a root switch
+    # that could not be undone, it is one of the two systems left to recover.
+    if [[ -d $TOP_MNT/$NEXT_NAME && ${swap_done:-0} == 0 && -d $TOP_MNT/@ ]]; then
       btrfs subvolume delete --recursive "$TOP_MNT/$NEXT_NAME" >/dev/null 2>&1 || true
     fi
     umount -R "$TOP_MNT" 2>/dev/null || true
@@ -508,7 +510,12 @@ stage_full_reset() {
   log "Activating the factory system"
   local old="@omarchy-old-$(date +%s)"
   mv "$top/@" "$top/$old"
-  mv "$next" "$top/@"
+  if ! mv "$next" "$top/@"; then
+    # Without @ the machine boots nothing, so put the running root back.
+    mv "$top/$old" "$top/@" ||
+      fail "could not activate the factory system or restore $old as @; rename it back to @ from a live USB"
+    fail "could not activate the factory system"
+  fi
   swap_done=1
   commit_next_boot
   sync
