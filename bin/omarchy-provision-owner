@@ -16,6 +16,7 @@ set -euo pipefail
 PROVISIONING_DIR=/var/lib/omarchy/provisioning
 OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 LOG_FILE=/var/log/omarchy-provision-owner.log
+REGION_MARKER=/etc/omarchy/region
 
 if (( EUID != 0 )); then
   echo "Error: omarchy-provision-owner must run as root" >&2
@@ -650,7 +651,21 @@ user_form() {
   omarchy_prompt_hostname || return $?
 
   step "Let's set your timezone..."
-  omarchy_prompt_timezone || return $?
+  omarchy_prompt_timezone "$(region_timezone)" || return $?
+}
+
+# The zone a region profile preselects when there is no geo guess, which is
+# every offline first boot. Reads the marker omarchy-apply-pacman reads; global,
+# missing, or malformed regions offer nothing.
+region_timezone() {
+  local region=global profile
+  if [[ -r $REGION_MARKER ]]; then
+    region=$(<"$REGION_MARKER")
+  fi
+  profile="$OMARCHY_PATH/default/regions/$region/timezone"
+  if [[ $region =~ ^[a-z]{2}$ && -r $profile ]]; then
+    head -n 1 "$profile"
+  fi
 }
 
 confirm_form() {

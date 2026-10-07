@@ -59,7 +59,7 @@ fi
 
 trap 'if [[ ${FUNCNAME[0]:-} == "$PROMPT_FN" ]]; then printf "returned\n" >>"$MARKER"; fi' RETURN
 
-"$PROMPT_FN"
+"$PROMPT_FN" ${PROMPT_ARG:+"$PROMPT_ARG"}
 
 printf 'keyboard=%s\n' "${keyboard:-}"
 printf 'keyboard_label=%s\n' "${keyboard_label:-}"
@@ -224,6 +224,19 @@ assert_status 0 "timezone prompt survives a failed geo guess"
 [[ $(field timezone) == "America/Chicago" ]] || fail "timezone prompt keeps the filtered timezone"
 [[ $(head -n 1 "$GUM_ARGS") == filter* ]] || fail "timezone prompt filters when there is no geo guess"
 pass "timezone prompt falls back to filtering when the geo guess fails"
+
+# A region's default stands in for the missing guess, so an offline China
+# install opens on Asia/Shanghai instead of the top of the list
+PROMPT_ARG=Asia/Shanghai run_prompt omarchy_prompt_timezone "0:Asia/Shanghai"
+assert_status 0 "timezone prompt accepts the caller's fallback"
+[[ $(field timezone) == "Asia/Shanghai" ]] || fail "timezone prompt keeps the preselected fallback"
+grep -qF -- '--selected Asia/Shanghai' "$GUM_ARGS" || fail "timezone prompt preselects the caller's fallback"
+[[ $(head -n 1 "$GUM_ARGS") == choose* ]] || fail "timezone prompt chooses from the list when it has a fallback"
+pass "timezone prompt preselects the caller's fallback when the geo guess fails"
+
+TZ_GUESS=Europe/Copenhagen PROMPT_ARG=Asia/Shanghai run_prompt omarchy_prompt_timezone "0:Europe/Copenhagen"
+grep -qF -- '--selected Europe/Copenhagen' "$GUM_ARGS" || fail "a geo guess outranks the caller's fallback"
+pass "timezone prompt prefers the geo guess over the caller's fallback"
 
 run_prompt omarchy_prompt_timezone "0:"
 assert_status 0 "timezone prompt accepts an empty selection"
