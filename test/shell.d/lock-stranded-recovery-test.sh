@@ -22,7 +22,7 @@ assert(
 // A second shell on the display (a test copy, a dev checkout) taking a healthy
 // lock moves Hyprland's lock to itself, and its exit leaves the failsafe up.
 assert(
-  /id: strandedLockCheckProc[\s\S]*\(\( status == 0 \)\) && ! omarchy-shell-is-session; then exit 3/.test(serviceQml),
+  /id: strandedLockCheckProc[\s\S]*\(\( status == 0 \)\) && ! omarchy-shell-is-session \\"\$PPID\\"; then exit 3/.test(serviceQml),
   'only the session shell treats a compositor lock as stranded'
 )
 

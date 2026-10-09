@@ -1,22 +1,44 @@
 #!/bin/bash
 
-# omarchy:summary=Report whether $OMARCHY_PATH is the tree the session's shell runs from
+# omarchy:summary=Report whether the calling shell is the one the session runs
+# omarchy:args=<shell-pid>
 # omarchy:hidden=true
 
 # Other shells share the session's display: test copies, a checkout run by
-# hand. None of them may act for the session, since Hyprland hands its lock to
-# whichever client asks last and a short-lived shell taking it leaves the
-# lockdead failsafe up once it exits. The user manager carries the session's
-# OMARCHY_PATH, the one omarchy-restart-shell relaunches from.
+# hand, a duplicate started without -n. None of them may act for the session,
+# since Hyprland hands its lock to whichever client asks last and a short-lived
+# shell taking it leaves the lockdead failsafe up once it exits. The user
+# manager carries the session's OMARCHY_PATH, the one omarchy-restart-shell
+# relaunches from, and of several shells from that tree the first one launched
+# is the session's.
 #
-# Exits 0 when this is the session's shell, or when the session records no
-# path to compare against, and 1 otherwise.
+# Exits 0 for the session's shell, or when the session records no path to
+# compare against, and 1 otherwise.
+shell_pid=${1:-}
+own_path=$(realpath -m -- "${OMARCHY_PATH:-}")
 session_path=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^OMARCHY_PATH=//p' | tail -n 1)
 
-if [[ -z $session_path ]]; then
-  exit 0
-elif [[ $(realpath -m -- "$session_path") == "$(realpath -m -- "${OMARCHY_PATH:-}")" ]]; then
-  exit 0
-else
+if [[ -n $session_path && $(realpath -m -- "$session_path") != "$own_path" ]]; then
   exit 1
 fi
+
+instances=$(quickshell list --all --json 2>/dev/null |
+  jq -r '.[] | [.pid, .launch_time, .config_path] | @tsv' 2>/dev/null)
+own_launch=$(awk -F '\t' -v pid="$shell_pid" '$1 == pid { print $2 }' <<<"$instances")
+
+# Without its own entry there is nothing to order this shell against.
+[[ -n $own_launch ]] || exit 0
+
+while IFS=$'\t' read -r pid launch config_path; do
+  [[ -n $pid && $pid != "$shell_pid" ]] || continue
+  [[ $(realpath -m -- "$config_path") == "$own_path/shell/shell.qml" ]] || continue
+
+  # Launch times have one-second resolution, so a tie goes to the lower pid.
+  if [[ $launch < $own_launch ]]; then
+    exit 1
+  elif [[ $launch == "$own_launch" ]] && (( pid < shell_pid )); then
+    exit 1
+  fi
+done <<<"$instances"
+
+exit 0
