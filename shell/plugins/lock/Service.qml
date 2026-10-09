@@ -684,8 +684,17 @@ Item {
   // bash is the shell.
   Process {
     id: strandedLockCheckProc
-    command: ["bash", "-c", "omarchy-hyprland-session-locked; status=$?; if (( status == 0 )) && ! omarchy-shell-is-session \"$PPID\"; then exit 3; fi; exit $status"]
+    command: ["bash", "-c", "omarchy-hyprland-session-locked; status=$?; if (( status == 0 )); then omarchy-shell-is-session \"$PPID\"; case $? in 1) exit 3 ;; 2) exit 4 ;; esac; fi; exit $status"]
     onExited: function(exitCode) {
+      // An older shell from the session's tree owns recovery while it lives.
+      // Keep asking: once it is gone, -n keeps a replacement from starting
+      // beside this one, so this shell inherits the session.
+      if (exitCode === 4) {
+        if (root.lastEvent !== "lock-stranded: left to an older session shell") root.logEvent("lock-stranded: left to an older session shell")
+        strandedLockRetryTimer.rearm()
+        return
+      }
+
       // No output to read the lock off yet.
       if (exitCode === 2) return
 

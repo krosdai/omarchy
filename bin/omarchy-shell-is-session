@@ -9,36 +9,43 @@
 # since Hyprland hands its lock to whichever client asks last and a short-lived
 # shell taking it leaves the lockdead failsafe up once it exits. The user
 # manager carries the session's OMARCHY_PATH, the one omarchy-restart-shell
-# relaunches from, and of several shells from that tree the first one launched
-# is the session's.
+# relaunches from, and of several shells from that tree on this display the
+# oldest one is the session's.
 #
 # Exits 0 for the session's shell, or when the session records no path to
-# compare against, and 1 otherwise.
+# compare against; 1 for a shell from another tree; 2 for a duplicate that
+# would become the session's shell once the older one is gone.
 shell_pid=${1:-}
-own_path=$(realpath -m -- "${OMARCHY_PATH:-}")
-session_path=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^OMARCHY_PATH=//p' | tail -n 1)
 
-if [[ -n $session_path && $(realpath -m -- "$session_path") != "$own_path" ]]; then
+# The manager's raw environment, since show-environment escapes values that
+# hold spaces or other shell syntax.
+session_path=$(busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+  org.freedesktop.systemd1.Manager Environment 2>/dev/null |
+  jq -r '.data[] | select(startswith("OMARCHY_PATH=")) | ltrimstr("OMARCHY_PATH=")' 2>/dev/null | tail -n 1)
+
+if [[ -n $session_path && $(realpath -m -- "$session_path") != "$(realpath -m -- "${OMARCHY_PATH:-}")" ]]; then
   exit 1
 fi
 
-instances=$(quickshell list --all --json 2>/dev/null |
-  jq -r '.[] | [.pid, .launch_time, .config_path] | @tsv' 2>/dev/null)
-own_launch=$(awk -F '\t' -v pid="$shell_pid" '$1 == pid { print $2 }' <<<"$instances")
+# Clock ticks since boot: unlike Quickshell's wall-clock launch time, these
+# keep their order when the clock moves back.
+start_ticks() {
+  local stat fields
+  { stat=$(<"/proc/$1/stat"); } 2>/dev/null || return 1
+  read -ra fields <<<"${stat##*) }"
+  echo "${fields[19]}"
+}
 
-# Without its own entry there is nothing to order this shell against.
-[[ -n $own_launch ]] || exit 0
+own_start=$(start_ticks "$shell_pid") || exit 0
 
-while IFS=$'\t' read -r pid launch config_path; do
+# Listing by config path keeps to this display.
+while read -r pid; do
   [[ -n $pid && $pid != "$shell_pid" ]] || continue
-  [[ $(realpath -m -- "$config_path") == "$own_path/shell/shell.qml" ]] || continue
+  start=$(start_ticks "$pid") || continue
 
-  # Launch times have one-second resolution, so a tie goes to the lower pid.
-  if [[ $launch < $own_launch ]]; then
-    exit 1
-  elif [[ $launch == "$own_launch" ]] && (( pid < shell_pid )); then
-    exit 1
+  if (( start < own_start || (start == own_start && pid < shell_pid) )); then
+    exit 2
   fi
-done <<<"$instances"
+done < <(quickshell list -p "${OMARCHY_PATH:-}/shell" --json 2>/dev/null | jq -r '.[].pid' 2>/dev/null)
 
 exit 0
