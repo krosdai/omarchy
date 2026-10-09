@@ -19,6 +19,18 @@ assert(
   'the startup check goes through the shared session lock helper'
 )
 
+// A second shell on the display (a test copy, a dev checkout) taking a healthy
+// lock moves Hyprland's lock to itself, and its exit leaves the failsafe up.
+assert(
+  /id: strandedLockCheckProc[\s\S]*\(\( status == 0 \)\) && omarchy-shell-lock-held \\"\$PPID\\"; then exit 3/.test(serviceQml),
+  'a lock another live shell holds is not reported as stranded'
+)
+
+assert(
+  /if \(exitCode === 3\) root\.logEvent\("lock-stranded: held by "/.test(serviceQml),
+  'leaving another shell its lock is recorded in the journal'
+)
+
 // "No output to read" taken for "unlocked" leaves the failsafe up for good.
 assert(
   /onExited: function\(exitCode\) \{[\s\S]*if \(exitCode === 2\) return/.test(serviceQml),

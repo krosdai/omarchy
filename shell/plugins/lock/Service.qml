@@ -677,14 +677,21 @@ Item {
     onTriggered: root.refreshFingerprintStatus()
   }
 
+  // A compositor lock another live shell holds is not stranded: taking it over
+  // would hand Hyprland's lock to this shell, and its exit would leave the
+  // lockdead failsafe up behind a lock screen that still looks healthy. The
+  // parent of this bash is the shell, so it is left out of the search.
   Process {
     id: strandedLockCheckProc
-    command: ["bash", "-c", "omarchy-hyprland-session-locked"]
+    command: ["bash", "-c", "omarchy-hyprland-session-locked; status=$?; if (( status == 0 )) && omarchy-shell-lock-held \"$PPID\"; then exit 3; fi; exit $status"]
+    stdout: StdioCollector { id: strandedLockHolder; waitForEnd: true }
     onExited: function(exitCode) {
       // No output to read the lock off yet.
       if (exitCode === 2) return
 
       root.strandedLockResolved = true
+
+      if (exitCode === 3) root.logEvent("lock-stranded: held by " + String(strandedLockHolder.text || "").trim())
 
       // A lock taken while this was in flight is this shell's own.
       root.strandedLock = exitCode === 0 && !root.locked && !root.lockRequested
