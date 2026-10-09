@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# omarchy:summary=Report whether $OMARCHY_PATH is the tree the session's shell runs from
+# omarchy:hidden=true
+
+# Other shells share the session's display: test copies, a checkout run by
+# hand. None of them may act for the session, since Hyprland hands its lock to
+# whichever client asks last and a short-lived shell taking it leaves the
+# lockdead failsafe up once it exits. The user manager carries the session's
+# OMARCHY_PATH, the one omarchy-restart-shell relaunches from.
+#
+# Exits 0 when this is the session's shell, or when the session records no
+# path to compare against, and 1 otherwise.
+session_path=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^OMARCHY_PATH=//p' | tail -n 1)
+
+if [[ -z $session_path ]]; then
+  exit 0
+elif [[ $(realpath -m -- "$session_path") == "$(realpath -m -- "${OMARCHY_PATH:-}")" ]]; then
+  exit 0
+else
+  exit 1
+fi

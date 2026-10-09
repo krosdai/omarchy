@@ -22,13 +22,13 @@ assert(
 // A second shell on the display (a test copy, a dev checkout) taking a healthy
 // lock moves Hyprland's lock to itself, and its exit leaves the failsafe up.
 assert(
-  /id: strandedLockCheckProc[\s\S]*\(\( status == 0 \)\) && omarchy-shell-lock-held \\"\$PPID\\"; then exit 3/.test(serviceQml),
-  'a lock another live shell holds is not reported as stranded'
+  /id: strandedLockCheckProc[\s\S]*\(\( status == 0 \)\) && ! omarchy-shell-is-session; then exit 3/.test(serviceQml),
+  'only the session shell treats a compositor lock as stranded'
 )
 
 assert(
-  /if \(exitCode === 3\) root\.logEvent\("lock-stranded: held by "/.test(serviceQml),
-  'leaving another shell its lock is recorded in the journal'
+  /root\.strandedLockResolved = true\s*\n\s*if \(exitCode === 3\) root\.logEvent\("lock-stranded: left to the session shell"\)\s*\n[\s\S]*root\.strandedLock = exitCode === 0/.test(serviceQml),
+  'a shell that leaves the lock to the session shell says so and never recovers it'
 )
 
 // "No output to read" taken for "unlocked" leaves the failsafe up for good.
