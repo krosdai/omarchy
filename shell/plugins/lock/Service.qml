@@ -678,23 +678,13 @@ Item {
   }
 
   // Only the session's shell may recover a stranded lock. Hyprland hands its
-  // lock to whichever client asks last, so a test copy, hand-run checkout or
-  // duplicate retaking a healthy lock would leave the lockdead failsafe up once
-  // it exits, behind a lock screen that still looks healthy. The parent of this
-  // bash is the shell.
+  // lock to whichever client asks last, so a test copy or hand-run checkout
+  // retaking a healthy lock would leave the lockdead failsafe up once it exits,
+  // behind a lock screen that still looks healthy.
   Process {
     id: strandedLockCheckProc
-    command: ["bash", "-c", "omarchy-hyprland-session-locked; status=$?; if (( status == 0 )); then omarchy-shell-is-session \"$PPID\"; case $? in 1) exit 3 ;; 2) exit 4 ;; esac; fi; exit $status"]
+    command: ["bash", "-c", "omarchy-hyprland-session-locked; status=$?; if (( status == 0 )) && ! omarchy-shell-is-session; then exit 3; fi; exit $status"]
     onExited: function(exitCode) {
-      // An older shell from the session's tree owns recovery while it lives.
-      // Keep asking: once it is gone, -n keeps a replacement from starting
-      // beside this one, so this shell inherits the session.
-      if (exitCode === 4) {
-        if (root.lastEvent !== "lock-stranded: left to an older session shell") root.logEvent("lock-stranded: left to an older session shell")
-        strandedLockRetryTimer.rearm()
-        return
-      }
-
       // No output to read the lock off yet.
       if (exitCode === 2) return
 

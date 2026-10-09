@@ -22,15 +22,8 @@ assert(
 // A second shell on the display (a test copy, a dev checkout) taking a healthy
 // lock moves Hyprland's lock to itself, and its exit leaves the failsafe up.
 assert(
-  /id: strandedLockCheckProc[\s\S]*if \(\( status == 0 \)\); then omarchy-shell-is-session \\"\$PPID\\"; case \$\? in 1\) exit 3 ;; 2\) exit 4 ;; esac; fi/.test(serviceQml),
+  /id: strandedLockCheckProc[\s\S]*\(\( status == 0 \)\) && ! omarchy-shell-is-session; then exit 3/.test(serviceQml),
   'only the session shell treats a compositor lock as stranded'
-)
-
-// With -n, the launcher cannot start a replacement beside a duplicate, so a
-// duplicate that deferred must take over once the older shell is gone.
-assert(
-  /if \(exitCode === 4\) \{[\s\S]*?strandedLockRetryTimer\.rearm\(\)\s*\n\s*return\s*\n\s*\}[\s\S]*?root\.strandedLockResolved = true/.test(serviceQml),
-  'a duplicate deferring to an older session shell keeps asking instead of resolving'
 )
 
 assert(
