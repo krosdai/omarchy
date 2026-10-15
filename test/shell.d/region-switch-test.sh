@@ -27,7 +27,16 @@ for arg in "\$@"; do
   [[ \$arg == /etc/* ]] && arg=\$SUDO_TEST_CAPTURE\$arg
   args+=("\$arg")
 done
-exec /usr/bin/$command "\${args[@]}"
+status=0
+/usr/bin/$command "\${args[@]}" || status=\$?
+# Model a closed terminal right after this step: the switch gets a hangup, and
+# with REGION_TEST_DEAD_SUDO root can no longer authenticate for the rollback.
+if [[ \${REGION_TEST_HUP_AFTER:-} == "$command \${!#}" && ! -e \$SUDO_TEST_CAPTURE/failed ]]; then
+  : >"\$SUDO_TEST_CAPTURE/failed"
+  [[ \${REGION_TEST_DEAD_SUDO:-0} != 1 ]] || : >"\$SUDO_TEST_CAPTURE/terminal-closed"
+  pkill -HUP -f "\$SUDO_TEST_ROOT/bin/omarchy-region (world|china)"
+fi
+exit \$status
 STUB
   chmod +x "$SUDO_TEST_ROOT/bin/$command"
 done
@@ -42,10 +51,19 @@ STUB
   chmod +x "$SUDO_TEST_ROOT/bin/$name"
 done
 
+# A closed terminal leaves sudo unable to ask for a password.
+/usr/bin/mv "$SUDO_TEST_ROOT/mock/sudo" "$SUDO_TEST_ROOT/mock/sudo.real"
+cat >"$SUDO_TEST_ROOT/mock/sudo" <<'STUB'
+#!/bin/bash
+case "${1:-}" in -k|-K|-h) ;; *) [[ ! -e $SUDO_TEST_CAPTURE/terminal-closed ]] || { printf 'sudo-refused %s\n' "$*" >>"$SUDO_TEST_LOG"; exit 1; } ;; esac
+exec "$SUDO_TEST_ROOT/mock/sudo.real" "$@"
+STUB
+chmod +x "$SUDO_TEST_ROOT/mock/sudo"
+
 start_global() {
   reset_boundary
-  unset REGION_TEST_FAIL REGION_TEST_SIGNAL
-  /usr/bin/rm -f "$SUDO_TEST_CAPTURE/etc/omarchy/region" "$SUDO_TEST_CAPTURE/failed"
+  unset REGION_TEST_FAIL REGION_TEST_SIGNAL REGION_TEST_HUP_AFTER REGION_TEST_DEAD_SUDO
+  /usr/bin/rm -f "$SUDO_TEST_CAPTURE/etc/omarchy/region" "$SUDO_TEST_CAPTURE/failed" "$SUDO_TEST_CAPTURE/terminal-closed"
   /usr/bin/cp "$ROOT/default/pacman/pacman-stable.conf" "$SUDO_TEST_CAPTURE/etc/pacman.conf"
   /usr/bin/cp "$ROOT/default/pacman/mirrorlist-stable" "$SUDO_TEST_CAPTURE/etc/pacman.d/mirrorlist"
 }
@@ -101,8 +119,8 @@ switch china || fail "switching to China failed" "$(<"$boundary_tmp/output")"
 /usr/bin/cp "$SUDO_TEST_CAPTURE/etc/pacman.d/mirrorlist" "$boundary_tmp/china.mirrors"
 from_china() {
   reset_boundary
-  unset REGION_TEST_FAIL REGION_TEST_SIGNAL
-  /usr/bin/rm -f "$SUDO_TEST_CAPTURE/failed"
+  unset REGION_TEST_FAIL REGION_TEST_SIGNAL REGION_TEST_HUP_AFTER REGION_TEST_DEAD_SUDO
+  /usr/bin/rm -f "$SUDO_TEST_CAPTURE/failed" "$SUDO_TEST_CAPTURE/terminal-closed"
   printf 'cn\n' >"$SUDO_TEST_CAPTURE/etc/omarchy/region"
   /usr/bin/cp "$boundary_tmp/china.conf" "$SUDO_TEST_CAPTURE/etc/pacman.conf"
   /usr/bin/cp "$boundary_tmp/china.mirrors" "$SUDO_TEST_CAPTURE/etc/pacman.d/mirrorlist"
@@ -135,3 +153,24 @@ start_global
 if switch moon; then fail "an unknown region is accepted"; fi
 ! grep -q '^sudo -N' "$SUDO_TEST_LOG" || fail "an unknown region reached privileged work"
 pass "an unknown region is refused before any privileged work"
+
+# A hangup after the marker moved means the switch happened: it is finished,
+# not half undone.
+start_global
+export REGION_TEST_HUP_AFTER="mv /etc/omarchy/region"
+switch china || true
+[[ $(<"$SUDO_TEST_CAPTURE/etc/omarchy/region") == cn ]] || fail "a hangup after the marker keeps China"
+cmp "$boundary_tmp/china.conf" "$SUDO_TEST_CAPTURE/etc/pacman.conf" || fail "a hangup after the marker keeps China's pacman.conf"
+! grep -q '^step:omarchy-region-user global' "$SUDO_TEST_LOG" || fail "a hangup after the marker undoes the developer tools"
+pass "a hangup after the marker moved leaves the new region complete"
+
+# A closed terminal before the marker, with no way to authenticate the
+# rollback, says so instead of claiming nothing changed.
+from_china
+export REGION_TEST_HUP_AFTER="cp /etc/pacman.conf" REGION_TEST_DEAD_SUDO=1
+if switch world; then fail "a switch cut off by a closed terminal reports success"; fi
+[[ $(<"$SUDO_TEST_CAPTURE/etc/omarchy/region") == cn ]] || fail "a closed terminal keeps the China marker"
+grep -q "Run 'omarchy-region china' to finish" "$boundary_tmp/output" || fail "a rollback that cannot authenticate says how to finish" "$(<"$boundary_tmp/output")"
+! grep -q 'Nothing changed' "$boundary_tmp/output" || fail "a rollback that cannot authenticate does not claim nothing changed"
+grep -q '^step:omarchy-region-user cn' "$SUDO_TEST_LOG" || fail "a closed terminal still puts China's developer tools back"
+pass "a closed terminal that blocks the rollback says how to finish"

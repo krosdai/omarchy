@@ -18,40 +18,56 @@ esac
 python3 - "$region" "${CARGO_HOME:-$HOME/.cargo}/config.toml" "$OMARCHY_PATH/default/regions/cn/cargo.toml" <<'PY'
 import os, sys, tomllib
 region, path, fragment = sys.argv[1:]
-BEGIN, END = "# BEGIN omarchy region: managed by omarchy-region, removed for World", "# END omarchy region"
+BEGIN = "# BEGIN omarchy region: managed by omarchy-region, removed for World"
+END = "# END omarchy region"
+MODES = ("created", "joined", "appended")
+
+def leave(reason):
+    print(f"Leaving {path} alone: {reason}.", file=sys.stderr)
+    sys.exit(0)
 
 data = open(path, "rb").read() if os.path.exists(path) else None
-start = data.find(("\n" + BEGIN).encode()) if data is not None else -1
-if data is not None and data.startswith(BEGIN.encode()):
-    start = 0
-if start >= 0:
-    header_start = start + 1 if data[start:start + 1] == b"\n" else start
-    header_end = data.index(b"\n", header_start)
-    mode = data[header_start:header_end].decode().rsplit(" ", 1)[-1]
-    tail = data.index(END.encode() + b"\n", header_end) + len(END) + 1
-    before, after = data[:start], data[tail:]
-    if mode == "created":
-        data = after or None
-    elif mode == "joined":
-        data = before + after
-    else:  # "appended": the original ended with a newline, which `before` keeps
-        data = before + (b"\n" if before and not before.endswith(b"\n") else b"") + after
+if data is not None:
+    lines = data.split(b"\n")
+    begins = [i for i, line in enumerate(lines) if line.startswith(BEGIN.encode())]
+    ends = [i for i, line in enumerate(lines) if line == END.encode()]
+    if begins or ends:
+        mode = lines[begins[0]].decode(errors="replace")[len(BEGIN) + 1:] if begins else ""
+        # One complete block, or nothing is touched: a hand-edited marker could
+        # otherwise take the user's own lines with it.
+        if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0] or mode not in MODES or ends[0] == len(lines) - 1:
+            leave("its omarchy region block has been edited")
+        # before is everything ahead of the newline that precedes BEGIN; after
+        # is everything following END's newline.
+        before = b"\n".join(lines[:begins[0]])
+        after = b"\n".join(lines[ends[0] + 1:])
+        if mode == "appended":
+            # The original ended with a newline (or was empty) and is before.
+            data = before + after
+        elif mode == "joined":
+            # The original's last line had no newline; a line added later needs one.
+            data = before + (b"\n" + after if after else b"")
+        elif begins[0] == 0:
+            # Created by the block: only lines added after it stay.
+            data = after or None
+        else:
+            # Created by the block, with lines the user added above it.
+            data = before + b"\n" + after
 
 if region == "cn":
     try:
-        own = tomllib.loads((data or b"").decode()).get("source", {}).get("crates-io")
+        source = tomllib.loads((data or b"").decode()).get("source", {})
     except (tomllib.TOMLDecodeError, UnicodeDecodeError):
-        own = "unparseable"
-    if own:
-        print(f"Leaving {path} alone: it already configures crates.io or cannot be read as TOML.", file=sys.stderr)
+        leave("it cannot be read as TOML")
+    if "crates-io" in source or "omarchy-region" in source:
+        leave("it already configures crates.io's source")
+    block = open(fragment).read()
+    if data is None:
+        data = f"{BEGIN} created\n{block}{END}\n".encode()
+    elif data and not data.endswith(b"\n"):
+        data += f"\n{BEGIN} joined\n{block}{END}\n".encode()
     else:
-        block = open(fragment).read()
-        if data is None:
-            data = f"{BEGIN} created\n{block}{END}\n".encode()
-        elif data and not data.endswith(b"\n"):
-            data += f"\n{BEGIN} joined\n{block}{END}\n".encode()
-        else:
-            data += f"\n{BEGIN} appended\n{block}{END}\n".encode()
+        data += f"\n{BEGIN} appended\n{block}{END}\n".encode()
 
 if data is None:
     if os.path.exists(path):

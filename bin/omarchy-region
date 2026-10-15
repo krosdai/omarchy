@@ -33,25 +33,34 @@ case "$channel" in
   *) echo "Cannot tell this machine's package channel. Nothing changed." >&2; exit 1 ;;
 esac
 
-# Everything is prepared as the caller; root only copies finished files and
-# moves the marker into place last. Until that commits, every exit, including a
-# failure, a closed terminal or Ctrl+C, puts the previous region back.
+# Everything is prepared as the caller. The developer tool settings change
+# first, since undoing them needs no sudo; then root copies the two finished
+# pacman files and moves the marker into place, back to back. The marker on
+# disk decides the outcome: until it names the new region, every exit,
+# including a failure, a closed terminal or Ctrl+C, puts the old region back.
+target=world
+[[ $region == "global" ]] || target=china
 previous=global
 [[ $(omarchy-region-current) == china ]] && previous=cn
 work=$(mktemp -d)
-switched=0
-committed=0
+changed=0
+finished=0
 restore_previous() {
-  sudo cp -f /etc/pacman.conf.bak /etc/pacman.conf || true
-  sudo cp -f /etc/pacman.d/mirrorlist.bak /etc/pacman.d/mirrorlist || true
   omarchy-region-user "$previous" || true
-  sudo rm -f /etc/omarchy/region.new || true
+  if sudo cp -f /etc/pacman.conf.bak /etc/pacman.conf &&
+    sudo cp -f /etc/pacman.d/mirrorlist.bak /etc/pacman.d/mirrorlist; then
+    sudo rm -f /etc/omarchy/region.new || true
+    echo "Nothing changed: the region is still $(omarchy-region-current)." >&2
+  else
+    echo "The package mirrors could not be put back. Run 'omarchy-region $(omarchy-region-current)' to finish." >&2
+  fi
 }
 cleanup_region() {
   local status=$?
-  if (( switched && ! committed )); then
+  # Reapplying the current region leaves the marker as it was, so there only
+  # reaching the end counts.
+  if (( changed && ! finished )) && [[ $previous == "$region" || $(omarchy-region-current) != "$target" ]]; then
     restore_previous
-    echo "Nothing changed: the region is still $(omarchy-region-current)." >&2
   fi
   rm -rf "$work"
   omarchy_security_exit_with_revoked_sudo "$status"
@@ -77,19 +86,17 @@ fi
 
 sudo cp -f /etc/pacman.conf /etc/pacman.conf.bak
 sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
-switched=1
+changed=1
+omarchy-region-user "$region"
 sudo cp -f "$work/rendered/pacman.conf" /etc/pacman.conf
 sudo cp -f "$work/rendered/mirrorlist" /etc/pacman.d/mirrorlist
-omarchy-region-user "$region"
-
-# The marker is replaced by a rename, so it is always either the old region or
-# the new one.
+# A rename, so the marker is always either the old region or the new one.
 if [[ $region == "global" ]]; then
   sudo rm -f /etc/omarchy/region
 else
   sudo install -D -m 0644 "$work/target/etc/omarchy/region" /etc/omarchy/region.new
   sudo mv -f /etc/omarchy/region.new /etc/omarchy/region
 fi
-committed=1
 
+finished=1
 echo "Region set to $1. New terminals and apps use its mirrors."

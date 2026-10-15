@@ -50,9 +50,21 @@ printf '[net]\nretry = 5\n' >>"$CARGO_HOME/config.toml"
 user global
 [[ $(<"$CARGO_HOME/config.toml") == $'[net]\nretry = 5' ]] || fail "World keeps what the user added after the region's block" "$(cat "$CARGO_HOME/config.toml")"
 rm "$CARGO_HOME/config.toml"
+user cn
+{ printf '[build]\njobs = 4\n'; cat "$CARGO_HOME/config.toml"; } >"$scratch/prepended" && mv "$scratch/prepended" "$CARGO_HOME/config.toml"
+user global
+[[ $(<"$CARGO_HOME/config.toml") == $'[build]\njobs = 4' ]] || fail "World keeps what the user added above the region's block" "$(cat "$CARGO_HOME/config.toml")"
+rm "$CARGO_HOME/config.toml"
+printf '[build]\njobs = 4' >"$CARGO_HOME/config.toml"
+user cn
+printf '[net]\nretry = 5\n' >>"$CARGO_HOME/config.toml"
+user global
+[[ $(cat "$CARGO_HOME/config.toml"; echo .) == $'[build]\njobs = 4\n[net]\nretry = 5\n.' ]] || fail "World keeps lines apart around a joined block" "$(cat "$CARGO_HOME/config.toml")"
+python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$CARGO_HOME/config.toml" || fail "World leaves valid TOML around a joined block"
+rm "$CARGO_HOME/config.toml"
 pass "the user's own cargo config survives China and World byte for byte, empty or without a final newline"
 
-for own in '[source.crates-io]\nreplace-with = "mine"\n' '  [source."crates-io"]\nreplace-with = "mine"\n' '[source]\ncrates-io = { replace-with = "mine" }\n' 'not = valid = toml\n'; do
+for own in '[source.crates-io]\n' '[source.omarchy-region]\nregistry = "x"\n' '[source.crates-io]\nreplace-with = "mine"\n' '  [source."crates-io"]\nreplace-with = "mine"\n' '[source]\ncrates-io = { replace-with = "mine" }\n' 'not = valid = toml\n'; do
   printf "$own" >"$CARGO_HOME/config.toml"
   cp "$CARGO_HOME/config.toml" "$scratch/own.toml"
   user cn 2>/dev/null
@@ -60,6 +72,21 @@ for own in '[source.crates-io]\nreplace-with = "mine"\n' '  [source."crates-io"]
 done
 rm "$CARGO_HOME/config.toml"
 pass "a user's own crates.io setting, however spelled, and an unreadable config are left alone"
+
+# A hand-edited block is never guessed at: the file stays as it is, and the
+# switch itself still succeeds.
+begin="# BEGIN omarchy region: managed by omarchy-region, removed for World"
+for edited in "$begin appended\n[a]\nx = 1\n[b]\n$begin appended\n[c]\n# END omarchy region\n" \
+  "$begin appended\n[a]\n" "$begin appended\n[a]\n# END omarchy region" "$begin mine\n[a]\n# END omarchy region\n" "[a]\n# END omarchy region\n"; do
+  printf "$edited" >"$CARGO_HOME/config.toml"
+  cp "$CARGO_HOME/config.toml" "$scratch/edited.toml"
+  for region in global cn; do
+    user "$region" 2>/dev/null || fail "an edited block fails the $region switch"
+    cmp "$scratch/edited.toml" "$CARGO_HOME/config.toml" || fail "$region leaves an edited block alone: $edited"
+  done
+done
+rm "$CARGO_HOME/config.toml"
+pass "a hand-edited region block is left exactly as it is"
 
 printf 'HOME=/home/x\nPIP_INDEX_URL=https://example.invalid/pip\n' >"$SESSION_ENV"
 cp "$SESSION_ENV" "$scratch/session-before"
