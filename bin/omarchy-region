@@ -1,0 +1,97 @@
+#!/bin/bash -p
+
+# omarchy:summary=Set where packages and developer tools download from: world or china
+# omarchy:args=<world|china>
+# omarchy:examples=omarchy region china | omarchy region world
+# omarchy:requires-sudo=true
+
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+security_entrypoint=$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}") || exit 126
+source "${security_entrypoint%/*}/omarchy-security-functions" || exit 126
+omarchy_security_require_privileged_bash_startup || exit 126
+set -e
+omarchy_security_sanitize_bash_environment "$0" "$@"
+omarchy_security_require_source_root "$0"
+omarchy_security_install_sudo_cleanup_traps
+omarchy_security_revoke_sudo_timestamp || exit 1
+omarchy_security_enable_no_update_sudo
+
+case "${1:-}" in
+  world) region=global ;;
+  china) region=cn ;;
+  *) echo "Usage: omarchy-region <world|china>" >&2; exit 1 ;;
+esac
+
+channel=$(omarchy-channel-current)
+case "$channel" in
+  dev) channel=edge ;;
+  stable|rc|edge) ;;
+  *) echo "Cannot tell this machine's package channel. Nothing changed." >&2; exit 1 ;;
+esac
+
+# Everything is prepared as the caller; root only copies finished files and
+# writes the marker, which goes last so a failure leaves the old region whole.
+work=$(mktemp -d)
+cleanup_region() {
+  local status=$?
+  rm -rf "$work"
+  omarchy_security_exit_with_revoked_sudo "$status"
+}
+trap cleanup_region EXIT
+
+mkdir -p "$work/target/etc/omarchy" "$work/rendered"
+[[ $region == "global" ]] || printf '%s\n' "$region" >"$work/target/etc/omarchy/region"
+"$OMARCHY_PATH/bin/omarchy-apply-pacman" --render "$channel" "$work/rendered" "$work/target"
+
+# A region's first servers must answer before anything is switched to them.
+if [[ $region != "global" ]]; then
+  arch=$(uname -m)
+  omarchy_server=$(awk '$0 == "[omarchy]" { getline; sub(/^Server = /, ""); print; exit }' "$work/rendered/pacman.conf")
+  arch_server=$(sed -n '1s/^Server = //p' "$work/rendered/mirrorlist")
+  for url in "${omarchy_server//\$arch/$arch}/omarchy.db" "$(sed "s|\$repo|core|; s|\$arch|$arch|" <<<"$arch_server")/core.db"; do
+    if ! curl -fsSL --max-time 20 -o /dev/null "$url"; then
+      echo "Could not reach $url. Nothing changed." >&2
+      exit 1
+    fi
+  done
+fi
+
+sudo cp -f /etc/pacman.conf /etc/pacman.conf.bak
+sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
+restore_pacman() {
+  sudo cp -f /etc/pacman.conf.bak /etc/pacman.conf
+  sudo cp -f /etc/pacman.d/mirrorlist.bak /etc/pacman.d/mirrorlist
+}
+if ! { sudo cp -f "$work/rendered/pacman.conf" /etc/pacman.conf &&
+  sudo cp -f "$work/rendered/mirrorlist" /etc/pacman.d/mirrorlist; }; then
+  restore_pacman
+  echo "Could not switch the package mirrors. Nothing changed." >&2
+  exit 1
+fi
+
+previous=global
+[[ $(omarchy-region-current) == china ]] && previous=cn
+if ! omarchy-region-user "$region"; then
+  restore_pacman
+  omarchy-region-user "$previous" || true
+  echo "Could not switch developer tool registries. Nothing changed." >&2
+  exit 1
+fi
+
+if [[ $region == "global" ]]; then
+  marker_written() { sudo rm -f /etc/omarchy/region; }
+else
+  marker_written() { sudo install -D -m 0644 "$work/target/etc/omarchy/region" /etc/omarchy/region; }
+fi
+if ! marker_written; then
+  restore_pacman
+  omarchy-region-user "$previous" || true
+  echo "Could not record the region. Nothing changed." >&2
+  exit 1
+fi
+
+echo "Region set to $1. New terminals and apps use its mirrors."

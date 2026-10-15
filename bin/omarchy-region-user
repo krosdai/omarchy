@@ -1,0 +1,70 @@
+#!/bin/bash
+
+# omarchy:summary=Apply a region's developer tool settings for the current user
+# omarchy:args=<global|cn>
+# omarchy:hidden=true
+
+set -euo pipefail
+
+region=${1:-}
+case "$region" in
+  global|cn) ;;
+  *) echo "Usage: omarchy-region-user <global|cn>" >&2; exit 1 ;;
+esac
+
+begin="# BEGIN omarchy region: managed by omarchy-region, removed for World"
+end="# END omarchy region"
+
+# Remove this command's block, and the blank line it put before it, leaving
+# the rest of the file byte for byte; a file holding only the block goes.
+remove_block() {
+  local file=$1
+  [[ -f $file ]] && grep -qxF "$begin" "$file" || return 0
+  local stripped
+  stripped=$(mktemp)
+  awk -v begin="$begin" -v end="$end" '
+    $0 == begin { skipping = 1; if (held) held = 0; next }
+    skipping { if ($0 == end) skipping = 0; next }
+    { if (held) print ""; if ($0 == "") { held = 1; next }; held = 0; print }
+    END { if (held) print "" }
+  ' "$file" >"$stripped"
+  if [[ -s $stripped ]]; then
+    cat "$stripped" >"$file"
+  else
+    rm -f "$file"
+  fi
+  rm -f "$stripped"
+}
+
+# cargo has no environment setting for source replacement and `cargo install`
+# reads only $CARGO_HOME, so the region's registry goes in a marked block there.
+cargo_config=${CARGO_HOME:-$HOME/.cargo}/config.toml
+remove_block "$cargo_config"
+if [[ $region == "cn" ]]; then
+  if [[ -f $cargo_config ]] && grep -qE '^\[source\.crates-io\]' "$cargo_config"; then
+    echo "Leaving $cargo_config alone: it already replaces crates.io." >&2
+  else
+    mkdir -p "${cargo_config%/*}"
+    {
+      [[ -s $cargo_config ]] && printf '\n'
+      printf '%s\n' "$begin"
+      cat "$OMARCHY_PATH/default/regions/cn/cargo.toml"
+      printf '%s\n' "$end"
+    } >>"$cargo_config"
+  fi
+fi
+
+# New shells read the registries from the region marker (env-bootstrap). Apps
+# launched from the running session start from systemd's user environment, so
+# update it too; terminals already open keep what they started with.
+names=$(sed -n 's/^export \([A-Z_][A-Z0-9_]*\)=.*/\1/p' "$OMARCHY_PATH"/default/regions/*/environment | sort -u)
+if [[ -n $names ]] && systemctl --user show-environment >/dev/null 2>&1; then
+  # shellcheck disable=SC2086
+  systemctl --user unset-environment $names
+  if [[ $region != "global" ]]; then
+    assignments=$(env -i HOME="$HOME" OMARCHY_PATH="$OMARCHY_PATH" bash -c '. "$OMARCHY_PATH/default/regions/$1/environment"; env' bash "$region" |
+      grep -E "^($(tr '\n' '|' <<<"$names" | sed 's/|$//'))=")
+    mapfile -t assignment_list <<<"$assignments"
+    systemctl --user set-environment "${assignment_list[@]}"
+  fi
+fi

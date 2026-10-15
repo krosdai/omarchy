@@ -14,13 +14,24 @@ Refresh renders both files as the calling user and gives root only the finished 
 
 The China profile changes only where packages come from, never which repositories or keys are trusted. It puts Omarchy's China replica of the channel's Arch mirror first (`stable-mirror.omarchy.cn`, `rc-mirror.omarchy.cn`, or `mirror.omarchy.cn` for edge and dev) and Omarchy's China replica of the `[omarchy]` repository first (`pkgs.omarchy.cn/<channel>`), keeping the `.org` servers as the fallback. Both replicas serve the same signed packages as `.org`, so package signatures are checked against the same keys as everywhere else. pacman tries servers in order and moves to the next one when a download fails, including a 404. After three failed downloads from one server, it skips that server for the rest of the transaction. It also takes the package databases from the first server that answers, without comparing them, so the China replicas must carry complete, current metadata; they sync from `.org` within minutes.
 
-Installs from before regions have no marker and stay global; nothing changes their pacman files on update. An existing machine in mainland China opts in by writing the marker and refreshing: `echo cn | sudo tee /etc/omarchy/region` then `omarchy-refresh-pacman`, which backs up both files first.
+## Switching
+
+*Setup > Region* offers **World** (`global`) and **China** (`cn`), and `omarchy-region world|china` does the same from a terminal; `omarchy-region-current` prints the active one. Installs from before regions have no marker and are World until switched. A switch renders both pacman files as the caller, checks that the region's first servers answer, then has root copy the two files (keeping `.bak` copies), applies the developer tool settings, and writes or removes the marker last. Any failure on the way puts the previous pacman files and tool settings back, so the machine stays on its old region. Switching only reorders servers of the same signed repositories, so it does not resync or upgrade packages. Switching to World restores the channel templates byte for byte, the same files a refresh would write.
+
+## Developer tools
+
+While the marker says `cn`, `default/bash/env-bootstrap` exports the region's `environment` file, so every login shell, interactive shell, SSH session and the uwsm desktop session get the same registries, for every user. It covers npm (`NPM_CONFIG_REGISTRY`), pip and uv (`PIP_INDEX_URL`, `UV_DEFAULT_INDEX`), Go (`GOPROXY`, with `GOSUMDB=sum.golang.google.cn`, the reachable mirror of `sum.golang.org` that Go checks with the same key), rustup (`RUSTUP_DIST_SERVER`, `RUSTUP_UPDATE_ROOT`), Bundler (`BUNDLE_MIRROR__ALL`), RubyGems (`GEMRC`, pointing at the profile's `gemrc`) and Maven (`MAVEN_ARGS` with the profile's `maven-settings.xml`, found through `OMARCHY_PATH`). A value the user exported first is kept, and none of the user's own config files are rewritten. A switch also updates the running session's systemd user environment, so apps launched afterwards follow; terminals already open keep what they started with.
+
+cargo has no environment setting for source replacement, and `cargo install` reads only `$CARGO_HOME/config.toml`, so `omarchy-region-user` adds a block marked `# BEGIN omarchy region` there for the user who switches, and for the first user of a China install, and removes exactly that block for World. A config that already replaces crates.io is left alone.
+
+Not covered: tools mise installs from GitHub releases or other upstream URLs, the AUR, the arch-mact2 hardware repository, and Google services. Other users of the same machine get the registries through their shells but add the cargo block themselves with `omarchy-region-user cn`.
 
 ## Profile layout
 
 Each profile lives in `default/regions/<code>/`:
 
 - `timezones`: the timezones that select this region, one per line, with blank lines and `#` comments allowed. List tzdata's backward-compatible names too, since the installer's timezone list includes them. A timezone may belong to at most one profile.
+- `environment`: optional shell assignments exported while the region is active, each kept if the user set it first.
 - `pacman/`: per channel (`stable`, `rc`, `edge`), `omarchy-<channel>.prepend`, placed first in the `[omarchy]` section of `pacman.conf`, and `mirrorlist-<channel>.prepend`, placed ahead of the channel's mirrorlist, so the regional mirrors are tried first.
 
 A profile adds mirrors of repositories every install already uses, never a repository or a signing key of its own. Hong Kong, Macau and Taiwan belong to no profile under any timezone name, and a test keeps it that way.
@@ -36,7 +47,7 @@ There is one ISO for every region. The companion `omarchy-iso` repository reads 
 
 ## Scope of the China profile
 
-The China profile provides repository defaults only. Language is a separate installer choice, not part of a region: a Chinese speaker outside China keeps global mirrors, and a China install in English still gets the regional ones.
+The China profile provides mirror and registry defaults only. Language is a separate installer choice, not part of a region: a Chinese speaker outside China keeps global mirrors, and a China install in English still gets the regional ones.
 
 ## Remaining release validation
 

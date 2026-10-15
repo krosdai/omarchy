@@ -129,13 +129,13 @@ from pathlib import Path
 region = Path(os.environ["ROOT"]) / "default/regions/cn"
 files = sorted(str(path.relative_to(region)) for path in region.rglob("*") if path.is_file())
 expected = ["pacman/" + f"{kind}-{channel}.prepend" for kind in ("mirrorlist", "omarchy") for channel in ("edge", "rc", "stable")]
-assert files == sorted(expected + ["timezones"]), files
+assert files == sorted(expected + ["timezones", "environment", "cargo.toml", "gemrc", "maven-settings.xml"]), files
 # Mirrors of the same repositories only: no new repository, so no new signing keys.
 for fragment in region.glob("pacman/*.prepend"):
     for line in fragment.read_text().splitlines():
         assert line.startswith("Server = https://") and ".omarchy.cn/" in line, (fragment.name, line)
 PY
-pass "China profile only reorders mirrors of the repositories every install already trusts"
+pass "China profile only reorders package mirrors of the repositories every install already trusts"
 
 # The installer derives the region from the chosen timezone, so every profile
 # needs a mapping, and no timezone may select two regions.
