@@ -15,7 +15,7 @@ cp -r "$ROOT/default/regions/cn" "$SUDO_TEST_ROOT/default/regions/"
 export SUDO_TEST_CAPTURE="$boundary_tmp/capture"
 export OMARCHY_REGION_FILE="$SUDO_TEST_CAPTURE/etc/omarchy/region"
 mkdir -p "$SUDO_TEST_CAPTURE/etc/pacman.d"
-for command in cp install rm; do
+for command in cp install rm mv; do
   /usr/bin/rm -f "$SUDO_TEST_ROOT/bin/$command"
   cat >"$SUDO_TEST_ROOT/bin/$command" <<STUB
 #!/bin/bash
@@ -36,6 +36,7 @@ for name in omarchy-channel-current omarchy-region-user curl; do
 #!/bin/bash
 printf 'step:$name %s\n' "\$*" >>"\$SUDO_TEST_LOG"
 if [[ \${REGION_TEST_FAIL:-} == "$name" && ! -e \$SUDO_TEST_CAPTURE/failed ]]; then : >"\$SUDO_TEST_CAPTURE/failed"; exit 1; fi
+if [[ \${REGION_TEST_SIGNAL:-} == "$name" && ! -e \$SUDO_TEST_CAPTURE/failed ]]; then : >"\$SUDO_TEST_CAPTURE/failed"; kill -TERM "\$PPID"; fi
 [[ $name != omarchy-channel-current ]] || echo stable
 STUB
   chmod +x "$SUDO_TEST_ROOT/bin/$name"
@@ -43,7 +44,7 @@ done
 
 start_global() {
   reset_boundary
-  unset REGION_TEST_FAIL
+  unset REGION_TEST_FAIL REGION_TEST_SIGNAL
   /usr/bin/rm -f "$SUDO_TEST_CAPTURE/etc/omarchy/region" "$SUDO_TEST_CAPTURE/failed"
   /usr/bin/cp "$ROOT/default/pacman/pacman-stable.conf" "$SUDO_TEST_CAPTURE/etc/pacman.conf"
   /usr/bin/cp "$ROOT/default/pacman/mirrorlist-stable" "$SUDO_TEST_CAPTURE/etc/pacman.d/mirrorlist"
@@ -63,7 +64,8 @@ checks = [i for i, e in enumerate(events) if e.startswith('step:curl ')]
 assert len(checks) == 2, events
 assert max(checks) < index('sudo -N cp -f /etc/pacman.conf /etc/pacman.conf.bak'), events
 assert index('step:omarchy-region-user cn') < index('sudo -N install '), events
-assert index('sudo -N install ') == max(i for i, e in enumerate(events) if e.startswith('sudo -N ')), events
+# The marker is renamed into place, and that is root's last step.
+assert events[max(i for i, e in enumerate(events) if e.startswith('sudo -N '))] == 'sudo -N mv -f /etc/omarchy/region.new /etc/omarchy/region', events
 assert not any(e.startswith('sudo ') and ('bash' in e or 'omarchy-' in e) for e in events), events
 PY
 assert_boundary_cold "switch to China"
@@ -79,7 +81,7 @@ grep -q '^step:omarchy-region-user global' "$SUDO_TEST_LOG" || fail "World rever
 assert_boundary_cold "switch to World"
 pass "World restores today's pacman files byte for byte and removes the marker"
 
-for failure in curl "cp /etc/pacman.d/mirrorlist" omarchy-region-user "install /etc/omarchy/region"; do
+for failure in curl "cp /etc/pacman.d/mirrorlist" omarchy-region-user "install /etc/omarchy/region.new" "mv /etc/omarchy/region"; do
   start_global
   export REGION_TEST_FAIL=$failure
   if switch china; then
@@ -91,6 +93,43 @@ for failure in curl "cp /etc/pacman.d/mirrorlist" omarchy-region-user "install /
   assert_boundary_cold "failed $failure"
 done
 pass "any failure leaves the machine on its previous region"
+
+# From China: snapshot a China machine, then fail or interrupt every way out.
+start_global
+switch china || fail "switching to China failed" "$(<"$boundary_tmp/output")"
+/usr/bin/cp "$SUDO_TEST_CAPTURE/etc/pacman.conf" "$boundary_tmp/china.conf"
+/usr/bin/cp "$SUDO_TEST_CAPTURE/etc/pacman.d/mirrorlist" "$boundary_tmp/china.mirrors"
+from_china() {
+  reset_boundary
+  unset REGION_TEST_FAIL REGION_TEST_SIGNAL
+  /usr/bin/rm -f "$SUDO_TEST_CAPTURE/failed"
+  printf 'cn\n' >"$SUDO_TEST_CAPTURE/etc/omarchy/region"
+  /usr/bin/cp "$boundary_tmp/china.conf" "$SUDO_TEST_CAPTURE/etc/pacman.conf"
+  /usr/bin/cp "$boundary_tmp/china.mirrors" "$SUDO_TEST_CAPTURE/etc/pacman.d/mirrorlist"
+}
+still_china() {
+  [[ $(<"$SUDO_TEST_CAPTURE/etc/omarchy/region") == cn ]] || fail "$1 keeps the China marker"
+  [[ ! -e $SUDO_TEST_CAPTURE/etc/omarchy/region.new ]] || fail "$1 leaves no half-written marker"
+  cmp "$boundary_tmp/china.conf" "$SUDO_TEST_CAPTURE/etc/pacman.conf" || fail "$1 keeps China's pacman.conf"
+  cmp "$boundary_tmp/china.mirrors" "$SUDO_TEST_CAPTURE/etc/pacman.d/mirrorlist" || fail "$1 keeps China's mirrorlist"
+  grep -q '^step:omarchy-region-user cn' "$SUDO_TEST_LOG" || fail "$1 puts China's developer tools back" "$(<"$SUDO_TEST_LOG")"
+  assert_boundary_cold "$1"
+}
+for target in world china; do
+  from_china
+  export REGION_TEST_FAIL=omarchy-region-user
+  if switch "$target"; then fail "a failed switch to $target from China succeeds"; fi
+  still_china "a failed switch to $target"
+done
+from_china
+export REGION_TEST_FAIL="mv /etc/omarchy/region"
+if switch china; then fail "reapplying China succeeds although the marker could not be replaced"; fi
+still_china "a failed marker replacement"
+from_china
+export REGION_TEST_SIGNAL=omarchy-region-user
+if switch world; then fail "an interrupted switch reports success"; fi
+still_china "an interrupted switch"
+pass "a failed, interrupted or half-written switch from China leaves China whole"
 
 start_global
 if switch moon; then fail "an unknown region is accepted"; fi

@@ -7,11 +7,19 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 export HOME="$scratch/home" CARGO_HOME="$scratch/home/.cargo" OMARCHY_PATH="$ROOT"
 mkdir -p "$HOME" "$scratch/bin"
-# The live session's environment is a log, never the host's systemd.
-export SYSTEMCTL_LOG="$scratch/systemctl"
+# The live session's environment is a file, never the host's systemd.
+export SYSTEMCTL_LOG="$scratch/systemctl" SESSION_ENV="$scratch/session-env"
+: >"$SESSION_ENV"
 cat >"$scratch/bin/systemctl" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+shift
+command=$1; shift
+case "$command" in
+  show-environment) cat "$SESSION_ENV" ;;
+  set-environment) for assignment; do grep -v "^${assignment%%=*}=" "$SESSION_ENV" >"$SESSION_ENV.new" || true; printf '%s\n' "$assignment" >>"$SESSION_ENV.new"; mv "$SESSION_ENV.new" "$SESSION_ENV"; done ;;
+  unset-environment) for name; do grep -v "^$name=" "$SESSION_ENV" >"$SESSION_ENV.new" || true; mv "$SESSION_ENV.new" "$SESSION_ENV"; done ;;
+esac
 STUB
 chmod +x "$scratch/bin/systemctl"
 export PATH="$scratch/bin:$PATH"
@@ -26,29 +34,42 @@ user global
 [[ ! -e $CARGO_HOME/config.toml ]] || fail "World removes a cargo config only the region wrote"
 pass "the cargo registry follows the region and World removes it"
 
-printf '[build]\njobs = 4\n\n[net]\nretry = 5\n' >"$CARGO_HOME/config.toml"
-cp "$CARGO_HOME/config.toml" "$scratch/before.toml"
-user cn
-user global
-cmp "$scratch/before.toml" "$CARGO_HOME/config.toml" || fail "World restores the user's cargo config byte for byte" "$(diff "$scratch/before.toml" "$CARGO_HOME/config.toml")"
-pass "the user's own cargo config survives China and World byte for byte"
-
-printf '[source.crates-io]\nreplace-with = "mine"\n' >"$CARGO_HOME/config.toml"
-cp "$CARGO_HOME/config.toml" "$scratch/own.toml"
-user cn 2>/dev/null
-cmp "$scratch/own.toml" "$CARGO_HOME/config.toml" || fail "China leaves a user's own crates.io replacement alone"
+for original in '[build]\njobs = 4\n\n[net]\nretry = 5\n' '[build]\njobs = 4' '' '[build]\njobs = 4\n\n'; do
+  printf "$original" >"$CARGO_HOME/config.toml"
+  cp "$CARGO_HOME/config.toml" "$scratch/before.toml"
+  user cn
+  grep -q 'mirrors.aliyun.com/crates.io-index' "$CARGO_HOME/config.toml" || fail "China adds its registry to an existing cargo config"
+  python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$CARGO_HOME/config.toml" || fail "China leaves valid TOML"
+  user cn
+  user global
+  cmp "$scratch/before.toml" "$CARGO_HOME/config.toml" || fail "World restores the user's cargo config byte for byte" "$(od -c "$CARGO_HOME/config.toml" | head)"
+done
 rm "$CARGO_HOME/config.toml"
-pass "a user's own crates.io replacement is left alone"
-
-: >"$SYSTEMCTL_LOG"
 user cn
-grep -q '^--user set-environment .*GOSUMDB=sum.golang.google.cn' "$SYSTEMCTL_LOG" || fail "China updates the running session" "$(cat "$SYSTEMCTL_LOG")"
-grep -q "MAVEN_ARGS=--global-settings $ROOT/default/regions/cn/maven-settings.xml" "$SYSTEMCTL_LOG" || fail "Maven settings come from OMARCHY_PATH" "$(cat "$SYSTEMCTL_LOG")"
-: >"$SYSTEMCTL_LOG"
+printf '[net]\nretry = 5\n' >>"$CARGO_HOME/config.toml"
 user global
-grep -q '^--user unset-environment .*NPM_CONFIG_REGISTRY' "$SYSTEMCTL_LOG" && ! grep -q 'set-environment' <(grep -v unset "$SYSTEMCTL_LOG") ||
-  fail "World clears the running session's registries" "$(cat "$SYSTEMCTL_LOG")"
-pass "the running session's registries follow the region"
+[[ $(<"$CARGO_HOME/config.toml") == $'[net]\nretry = 5' ]] || fail "World keeps what the user added after the region's block" "$(cat "$CARGO_HOME/config.toml")"
+rm "$CARGO_HOME/config.toml"
+pass "the user's own cargo config survives China and World byte for byte, empty or without a final newline"
+
+for own in '[source.crates-io]\nreplace-with = "mine"\n' '  [source."crates-io"]\nreplace-with = "mine"\n' '[source]\ncrates-io = { replace-with = "mine" }\n' 'not = valid = toml\n'; do
+  printf "$own" >"$CARGO_HOME/config.toml"
+  cp "$CARGO_HOME/config.toml" "$scratch/own.toml"
+  user cn 2>/dev/null
+  cmp "$scratch/own.toml" "$CARGO_HOME/config.toml" || fail "China leaves alone: $own"
+done
+rm "$CARGO_HOME/config.toml"
+pass "a user's own crates.io setting, however spelled, and an unreadable config are left alone"
+
+printf 'HOME=/home/x\nPIP_INDEX_URL=https://example.invalid/pip\n' >"$SESSION_ENV"
+cp "$SESSION_ENV" "$scratch/session-before"
+user cn
+grep -qx 'GOSUMDB=sum.golang.google.cn' "$SESSION_ENV" || fail "China updates the running session" "$(cat "$SESSION_ENV")"
+grep -qx "MAVEN_ARGS=--global-settings $ROOT/default/regions/cn/maven-settings.xml" "$SESSION_ENV" || fail "Maven settings come from OMARCHY_PATH" "$(cat "$SESSION_ENV")"
+grep -qx 'PIP_INDEX_URL=https://example.invalid/pip' "$SESSION_ENV" || fail "China keeps a registry the user set in the session" "$(cat "$SESSION_ENV")"
+user global
+cmp <(sort "$scratch/session-before") <(sort "$SESSION_ENV") || fail "World returns the session to exactly what it was" "$(cat "$SESSION_ENV")"
+pass "the running session's registries follow the region and the user's own values stay"
 
 # Shells read the registries from the marker through env-bootstrap.
 printf 'OMARCHY_PATH=%q\n' "$ROOT" >"$scratch/omarchy.conf"
@@ -58,9 +79,10 @@ shell_env() {
     sh -c '. "$0"; env' "$scratch/env-bootstrap"
 }
 rm -f "$scratch/region"
+shell_env >/dev/null || fail "env-bootstrap runs for World"
 ! shell_env | grep -qE '^(NPM_CONFIG_REGISTRY|GOPROXY|GOSUMDB|MAVEN_ARGS)=' || fail "World exports no registries"
 printf 'cn\n' >"$scratch/region"
-env_cn=$(shell_env)
+env_cn=$(shell_env) || fail "env-bootstrap runs for China"
 grep -qx 'GOSUMDB=sum.golang.google.cn' <<<"$env_cn" || fail "China exports a reachable Go checksum database" "$env_cn"
 grep -qx 'NPM_CONFIG_REGISTRY=https://registry.npmmirror.com' <<<"$env_cn" || fail "China exports the npm mirror"
 grep -qx 'NPM_CONFIG_REGISTRY=https://example.invalid/npm' <<<"$(shell_env NPM_CONFIG_REGISTRY=https://example.invalid/npm)" ||
@@ -68,3 +90,14 @@ grep -qx 'NPM_CONFIG_REGISTRY=https://example.invalid/npm' <<<"$(shell_env NPM_C
 printf '../x\n' >"$scratch/region"
 ! shell_env | grep -q '^GOPROXY=' || fail "a malformed marker exports nothing"
 pass "shells export the region's registries only for China, and keep the user's own"
+
+# Root never sources a region's environment: on a dev link it lives in a
+# user-writable checkout.
+mkdir -p "$scratch/rootbin"
+printf '#!/bin/sh\necho 0\n' >"$scratch/rootbin/id"
+chmod +x "$scratch/rootbin/id"
+printf 'cn\n' >"$scratch/region"
+root_env=$(env -i HOME="$HOME" PATH="$scratch/rootbin:/usr/bin:/bin" OMARCHY_REGION_FILE="$scratch/region" sh -c '. "$0"; env' "$scratch/env-bootstrap") ||
+  fail "env-bootstrap runs for root"
+! grep -q '^GOPROXY=' <<<"$root_env" || fail "root's shells export no regional registries"
+pass "root's shells never source a region's environment"

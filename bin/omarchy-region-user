@@ -12,59 +12,77 @@ case "$region" in
   *) echo "Usage: omarchy-region-user <global|cn>" >&2; exit 1 ;;
 esac
 
-begin="# BEGIN omarchy region: managed by omarchy-region, removed for World"
-end="# END omarchy region"
-
-# Remove this command's block, and the blank line it put before it, leaving
-# the rest of the file byte for byte; a file holding only the block goes.
-remove_block() {
-  local file=$1
-  [[ -f $file ]] && grep -qxF "$begin" "$file" || return 0
-  local stripped
-  stripped=$(mktemp)
-  awk -v begin="$begin" -v end="$end" '
-    $0 == begin { skipping = 1; if (held) held = 0; next }
-    skipping { if ($0 == end) skipping = 0; next }
-    { if (held) print ""; if ($0 == "") { held = 1; next }; held = 0; print }
-    END { if (held) print "" }
-  ' "$file" >"$stripped"
-  if [[ -s $stripped ]]; then
-    cat "$stripped" >"$file"
-  else
-    rm -f "$file"
-  fi
-  rm -f "$stripped"
-}
-
 # cargo has no environment setting for source replacement and `cargo install`
 # reads only $CARGO_HOME, so the region's registry goes in a marked block there.
-cargo_config=${CARGO_HOME:-$HOME/.cargo}/config.toml
-remove_block "$cargo_config"
-if [[ $region == "cn" ]]; then
-  if [[ -f $cargo_config ]] && grep -qE '^\[source\.crates-io\]' "$cargo_config"; then
-    echo "Leaving $cargo_config alone: it already replaces crates.io." >&2
-  else
-    mkdir -p "${cargo_config%/*}"
-    {
-      [[ -s $cargo_config ]] && printf '\n'
-      printf '%s\n' "$begin"
-      cat "$OMARCHY_PATH/default/regions/cn/cargo.toml"
-      printf '%s\n' "$end"
-    } >>"$cargo_config"
-  fi
-fi
+# The block records what it added, so removing it restores the file exactly.
+python3 - "$region" "${CARGO_HOME:-$HOME/.cargo}/config.toml" "$OMARCHY_PATH/default/regions/cn/cargo.toml" <<'PY'
+import os, sys, tomllib
+region, path, fragment = sys.argv[1:]
+BEGIN, END = "# BEGIN omarchy region: managed by omarchy-region, removed for World", "# END omarchy region"
+
+data = open(path, "rb").read() if os.path.exists(path) else None
+start = data.find(("\n" + BEGIN).encode()) if data is not None else -1
+if data is not None and data.startswith(BEGIN.encode()):
+    start = 0
+if start >= 0:
+    header_start = start + 1 if data[start:start + 1] == b"\n" else start
+    header_end = data.index(b"\n", header_start)
+    mode = data[header_start:header_end].decode().rsplit(" ", 1)[-1]
+    tail = data.index(END.encode() + b"\n", header_end) + len(END) + 1
+    before, after = data[:start], data[tail:]
+    if mode == "created":
+        data = after or None
+    elif mode == "joined":
+        data = before + after
+    else:  # "appended": the original ended with a newline, which `before` keeps
+        data = before + (b"\n" if before and not before.endswith(b"\n") else b"") + after
+
+if region == "cn":
+    try:
+        own = tomllib.loads((data or b"").decode()).get("source", {}).get("crates-io")
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        own = "unparseable"
+    if own:
+        print(f"Leaving {path} alone: it already configures crates.io or cannot be read as TOML.", file=sys.stderr)
+    else:
+        block = open(fragment).read()
+        if data is None:
+            data = f"{BEGIN} created\n{block}{END}\n".encode()
+        elif data and not data.endswith(b"\n"):
+            data += f"\n{BEGIN} joined\n{block}{END}\n".encode()
+        else:
+            data += f"\n{BEGIN} appended\n{block}{END}\n".encode()
+
+if data is None:
+    if os.path.exists(path):
+        os.remove(path)
+else:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+PY
 
 # New shells read the registries from the region marker (env-bootstrap). Apps
 # launched from the running session start from systemd's user environment, so
-# update it too; terminals already open keep what they started with.
-names=$(sed -n 's/^export \([A-Z_][A-Z0-9_]*\)=.*/\1/p' "$OMARCHY_PATH"/default/regions/*/environment | sort -u)
-if [[ -n $names ]] && systemctl --user show-environment >/dev/null 2>&1; then
-  # shellcheck disable=SC2086
-  systemctl --user unset-environment $names
-  if [[ $region != "global" ]]; then
-    assignments=$(env -i HOME="$HOME" OMARCHY_PATH="$OMARCHY_PATH" bash -c '. "$OMARCHY_PATH/default/regions/$1/environment"; env' bash "$region" |
-      grep -E "^($(tr '\n' '|' <<<"$names" | sed 's/|$//'))=")
-    mapfile -t assignment_list <<<"$assignments"
-    systemctl --user set-environment "${assignment_list[@]}"
-  fi
+# update it too, touching only variables that are unset or hold a region's own
+# value; terminals already open keep what they started with.
+if systemctl --user show-environment >/dev/null 2>&1; then
+  mapfile -t region_values < <(for environment in "$OMARCHY_PATH"/default/regions/*/environment; do
+    env -i OMARCHY_PATH="$OMARCHY_PATH" bash -c '. "$1"; env' bash "$environment" |
+      grep -E "^($(sed -n 's/^export \([A-Z_][A-Z0-9_]*\)=.*/\1/p' "$environment" | paste -sd'|'))="
+  done)
+  current=$(systemctl --user show-environment)
+  unset_names=() set_values=()
+  for assignment in "${region_values[@]}"; do
+    name=${assignment%%=*}
+    value=$(grep -m1 "^$name=" <<<"$current" || true)
+    if [[ -z $value ]]; then
+      [[ $region != "global" ]] && grep -qxF "$assignment" < <(env -i OMARCHY_PATH="$OMARCHY_PATH" bash -c '. "$1"; env' bash "$OMARCHY_PATH/default/regions/$region/environment") &&
+        set_values+=("$assignment")
+    elif [[ $value == "$assignment" ]]; then
+      [[ $region == "global" ]] && unset_names+=("$name")
+    fi
+  done
+  (( ${#unset_names[@]} == 0 )) || systemctl --user unset-environment "${unset_names[@]}"
+  (( ${#set_values[@]} == 0 )) || systemctl --user set-environment "${set_values[@]}"
 fi
